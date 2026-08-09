@@ -19,6 +19,21 @@ python indexer.py --channel-url "https://www.youtube.com/@<handle>/videos"
 python generator.py --input output/channel_video_audit.csv
 ```
 
+## Regenerating descriptions
+
+`output/llm_cache.json` stores both transcripts and the generated descriptions. If you want to regenerate descriptions with a different model or `CHANNEL_CONTEXT` — without re-fetching transcripts from YouTube — use `--regenerate`:
+
+```bash
+# Regenerate all descriptions using cached transcripts
+python generator.py --input output/channel_video_audit.csv --regenerate
+
+# Regenerate with a different model
+python generator.py --input output/channel_video_audit.csv --regenerate --model gpt-5.4
+
+# Regenerate with a different channel context (CLI overrides .env)
+python generator.py --input output/channel_video_audit.csv --regenerate --channel-context "a healthcare webinar channel"
+```
+
 Outputs (all written to the `output/` folder):
 - `output/channel_video_audit.csv` — every video with metadata/description status, including a `status` column (`ok` or `metadata_failed`) (Output 1)
 - `output/review_report.csv` and `output/review_report.html` — missing-description videos with transcripts and suggested copy (Output 2)
@@ -54,10 +69,6 @@ Outputs (all written to the `output/` folder):
 | `--model` | from `LLM_MODEL` env | Model name passed to OpenCode Zen |
 | `--channel-context` | from `CHANNEL_CONTEXT` env | Optional free-form channel context (audience, tone, priorities) injected into the LLM prompt; generic, domain-agnostic prompt if unset |
 | `--regenerate` | `False` | Regenerate descriptions even if already cached (cached transcripts are reused) |
-
-If the primary model fails (e.g. a provider outage), each model in the
-comma-separated `LLM_MODEL_FALLBACKS` env var is tried in order; the run only
-aborts if all candidates fail.
 | `--limit` | `0` | Process N missing-description videos only (0 = all) |
 | `--transcripts-only` | `False` | Fetch transcripts only; do not call LLM |
 | `--audio-fallback` | `False` | Use local Whisper for videos with no captions |
@@ -76,5 +87,7 @@ pytest -q
 ## Notes
 - The channel URL is never hardcoded in the source; pass it as a CLI argument or via the `CHANNEL_URL` environment variable.
 - `.env` is gitignored by default. Never commit real API keys or URLs.
-- `output/llm_cache.json` caches transcripts and generated descriptions per video ID. If you change `--model`, `--channel-context`, or `CHANNEL_CONTEXT`, rerun with `--regenerate` to regenerate descriptions while reusing the cached transcripts — no need to delete the cache file or re-fetch transcripts.
+- `output/llm_cache.json` caches transcripts and generated descriptions per video ID. If you change `--model`, `--channel-context`, or `CHANNEL_CONTEXT`, rerun with `--regenerate` to regenerate descriptions while reusing the cached transcripts — no need to delete the cache file or re-fetch transcripts (see the **Regenerating descriptions** section above).
+- Transcripts are truncated to the first **20,000 characters** before being sent to the LLM. The full transcript is still stored in `output/llm_cache.json` and `output/review_report.csv`; only the LLM input is limited. The HTML report shows a note when truncation occurred.
+- If the primary LLM model fails (e.g. a provider outage), each model in the comma-separated `LLM_MODEL_FALLBACKS` env var is tried in order; the run only aborts if all candidates fail.
 - `output/channel_video_audit.csv` includes a `status` column. Rows with `status=metadata_failed` are videos whose metadata could not be fetched; they are tracked in the checkpoint so they are not retried forever on `--resume`.
