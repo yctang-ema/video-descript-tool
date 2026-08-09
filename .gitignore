@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.eggs/
+.venv/
+venv/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Generated outputs
+output/
+*.log
+
+# Sessions
+sessions/
+
+# Temporary audio files
+temp_audio/
+*.mp3
+*.m4a
+*.wav
+*.webm
+*.mkv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store

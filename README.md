@@ -1,0 +1,79 @@
+# Video Descript Tool
+
+Keyless YouTube channel auditor that finds videos with missing descriptions, fetches transcripts, and generates a stakeholder-review CSV + HTML report.
+
+## Quick Start
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+
+cp .env.example .env
+# Add your OpenCode Zen API key to .env
+
+# 1. Audit the channel
+python indexer.py --channel-url "https://www.youtube.com/@<handle>/videos"
+
+# 2. Generate suggested descriptions
+python generator.py --input output/channel_video_audit.csv
+```
+
+Outputs (all written to the `output/` folder):
+- `output/channel_video_audit.csv` — every video with metadata/description status, including a `status` column (`ok` or `metadata_failed`) (Output 1)
+- `output/review_report.csv` and `output/review_report.html` — missing-description videos with transcripts and suggested copy (Output 2)
+- `output/llm_cache.json` and `output/indexer_checkpoint.json` — resume/cache files
+
+## Requirements
+- Python 3.10+
+- OpenCode Zen API key (for description generation only)
+- No YouTube API key, Google login, or OAuth needed
+
+## CLI Options
+
+### `indexer.py`
+| Flag | Default | Description |
+|---|---|---|
+| `--channel-url` | required | Channel handle URL (e.g. `https://www.youtube.com/@<handle>/videos`); may also be set via `CHANNEL_URL` env var |
+| `--output` | `output/channel_video_audit.csv` | Audit CSV path |
+| `--sleep` | `3` | Base delay between per-video metadata requests (seconds) |
+| `--sleep-jitter` | `3` | Max jitter added to sleep (0 = none) |
+| `--batch-size` | `0` | Number of videos per batch; 0 disables batching |
+| `--batch-rest` | `300` | Seconds to rest between batches |
+| `--limit` | `0` | Stop after N videos (0 = all) |
+| `--description-threshold` | `30` | Minimum non-whitespace characters to count as a description |
+| `--resume` | `False` | Resume from `output/indexer_checkpoint.json` |
+
+### `generator.py`
+| Flag | Default | Description |
+|---|---|---|
+| `--input` | `output/channel_video_audit.csv` | Audit CSV path |
+| `--output-csv` | `output/review_report.csv` | Review CSV output |
+| `--output-html` | `output/review_report.html` | Review HTML output |
+| `--model` | from `LLM_MODEL` env | Model name passed to OpenCode Zen |
+| `--channel-context` | from `CHANNEL_CONTEXT` env | Optional free-form channel context (audience, tone, priorities) injected into the LLM prompt; generic, domain-agnostic prompt if unset |
+| `--regenerate` | `False` | Regenerate descriptions even if already cached (cached transcripts are reused) |
+
+If the primary model fails (e.g. a provider outage), each model in the
+comma-separated `LLM_MODEL_FALLBACKS` env var is tried in order; the run only
+aborts if all candidates fail.
+| `--limit` | `0` | Process N missing-description videos only (0 = all) |
+| `--transcripts-only` | `False` | Fetch transcripts only; do not call LLM |
+| `--audio-fallback` | `False` | Use local Whisper for videos with no captions |
+| `--whisper-model` | `base` | Whisper model size (tiny/base/small/medium) |
+| `--cache` | `output/llm_cache.json` | Cache file for transcripts and LLM output |
+| `--batch-size` | `0` | Transcript batch size; 0 disables batching |
+| `--batch-rest` | `300` | Seconds to rest between transcript batches |
+
+## Development
+```bash
+ruff check .
+mypy src
+pytest -q
+```
+
+## Notes
+- The channel URL is never hardcoded in the source; pass it as a CLI argument or via the `CHANNEL_URL` environment variable.
+- `.env` is gitignored by default. Never commit real API keys or URLs.
+- `output/llm_cache.json` caches transcripts and generated descriptions per video ID. If you change `--model`, `--channel-context`, or `CHANNEL_CONTEXT`, rerun with `--regenerate` to regenerate descriptions while reusing the cached transcripts — no need to delete the cache file or re-fetch transcripts.
+- `output/channel_video_audit.csv` includes a `status` column. Rows with `status=metadata_failed` are videos whose metadata could not be fetched; they are tracked in the checkpoint so they are not retried forever on `--resume`.

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-descript-tool"
+version = "0.1.0"
+description = "Keyless YouTube channel auditor that finds missing video descriptions and generates review reports from transcripts."
+requires-python = ">=3.10"
+dependencies = [
+    "yt-dlp",
+    "youtube-transcript-api",
+    "openai",
+    "tqdm",
+    "python-dotenv",
+    "faster-whisper",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true

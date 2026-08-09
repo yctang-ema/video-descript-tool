@@ -1,0 +1,285 @@
+"""Transcript fetcher and description generator (Tool 2)."""
+
+from __future__ import annotations
+
+import argparse
+import time
+from pathlib import Path
+from typing import Any
+
+from dotenv import load_dotenv
+from tqdm import tqdm
+
+from src.channel import jittered_sleep, load_audit_csv
+from src.llm import (
+    TRANSCRIPT_MAX_CHARS,
+    generate_description,
+    load_cache,
+    resolve_model,
+    save_cache,
+)
+from src.report import generate_review_html, write_review_csv
+from src.transcripts import (
+    TRANSCRIPT_STATUS_DISABLED,
+    TRANSCRIPT_STATUS_NO_CAPTIONS,
+    cleanup_temp_audio,
+    fetch_transcript,
+    transcribe_audio,
+)
+
+load_dotenv()
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Fetch transcripts and generate YouTube video descriptions."
+    )
+    parser.add_argument(
+        "--input",
+        default="output/channel_video_audit.csv",
+        help="Audit CSV produced by indexer.py",
+    )
+    parser.add_argument(
+        "--output-csv",
+        default="output/review_report.csv",
+        help="Review CSV output path",
+    )
+    parser.add_argument(
+        "--output-html",
+        default="output/review_report.html",
+        help="Review HTML output path",
+    )
+    parser.add_argument(
+        "--model",
+        default="",
+        help="LLM model name (overrides LLM_MODEL env var)",
+    )
+    parser.add_argument(
+        "--channel-context",
+        default="",
+        help="Short channel/topic description injected into the LLM prompt "
+        "(overrides CHANNEL_CONTEXT env var); leave empty for a generic prompt",
+    )
+    parser.add_argument(
+        "--regenerate",
+        action="store_true",
+        help="Regenerate descriptions even if already cached "
+        "(cached transcripts are still reused)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Process only N missing-description videos; 0 = all",
+    )
+    parser.add_argument(
+        "--transcripts-only",
+        action="store_true",
+        help="Fetch transcripts only; do not call the LLM",
+    )
+    parser.add_argument(
+        "--audio-fallback",
+        action="store_true",
+        help="Use local Whisper for videos with no captions",
+    )
+    parser.add_argument(
+        "--whisper-model",
+        default="base",
+        help="Whisper model size (tiny/base/small/medium)",
+    )
+    parser.add_argument(
+        "--cache",
+        default="output/llm_cache.json",
+        help="Cache file path for transcripts and LLM output",
+    )
+    parser.add_argument(
+        "--sleep",
+        type=float,
+        default=1.0,
+        help="Base delay between transcript requests (seconds)",
+    )
+    parser.add_argument(
+        "--sleep-jitter",
+        type=float,
+        default=1.0,
+        help="Max random jitter added to sleep (seconds)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        help="Transcripts per batch; 0 disables batching",
+    )
+    parser.add_argument(
+        "--batch-rest",
+        type=int,
+        default=300,
+        help="Seconds to rest between transcript batches",
+    )
+    parser.add_argument(
+        "--keep-audio",
+        action="store_true",
+        help="Keep temporary audio files instead of deleting them",
+    )
+    return parser.parse_args()
+
+
+def _load_whisper_model(model_size: str) -> Any:
+    """Load a faster-whisper model once for reuse."""
+    from faster_whisper import WhisperModel
+
+    return WhisperModel(model_size, device="cpu", compute_type="int8")
+
+
+def _get_transcript(
+    video_id: str,
+    cache: dict[str, Any],
+    args: argparse.Namespace,
+    whisper_model: Any | None,
+) -> tuple[str | None, str]:
+    """Return cached or freshly fetched transcript and its status."""
+    cached = cache.get(video_id, {})
+    if cached.get("transcript") and cached.get("transcript_status"):
+        return cached["transcript"], cached["transcript_status"]
+
+    transcript, status = fetch_transcript(video_id)
+    if status in {TRANSCRIPT_STATUS_DISABLED, TRANSCRIPT_STATUS_NO_CAPTIONS} and args.audio_fallback:
+        if whisper_model is None:
+            whisper_model = _load_whisper_model(args.whisper_model)
+        transcript, status = transcribe_audio(video_id, whisper_model)
+        if not args.keep_audio:
+            cleanup_temp_audio(video_id)
+
+    return transcript, status
+
+
+def _generate_suggested_description(
+    video_id: str,
+    title: str,
+    transcript: str,
+    cache: dict[str, Any],
+    model: str | None,
+    channel_context: str | None,
+    regenerate: bool = False,
+) -> str:
+    """Return cached or freshly generated description.
+
+    When ``regenerate`` is True, any cached description is ignored and a new
+    one is generated (cached transcripts are unaffected).
+    """
+    cached = cache.get(video_id, {})
+    if not regenerate and cached.get("suggested_description"):
+        return cached["suggested_description"]
+
+    suggested = generate_description(
+        title, transcript, model=model, channel_context=channel_context
+    )
+    cache.setdefault(video_id, {})
+    cache[video_id]["suggested_description"] = suggested
+    return suggested
+
+
+def _process_videos(
+    rows: list[dict[str, Any]],
+    args: argparse.Namespace,
+    cache: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Fetch transcripts and generate descriptions for missing-description videos.
+
+    Rows with a non-OK status (e.g. metadata_failed) are skipped because their
+    metadata could not be retrieved.
+    """
+    missing = [
+        row
+        for row in rows
+        if row.get("status", "ok") == "ok" and not row.get("has_description", False)
+    ]
+    if args.limit:
+        missing = missing[: args.limit]
+
+    whisper_model = None
+    if args.audio_fallback:
+        whisper_model = _load_whisper_model(args.whisper_model)
+
+    results: list[dict[str, Any]] = []
+    for idx, row in enumerate(tqdm(missing, desc="Processing videos")):
+        video_id = row.get("video_id", "")
+        title = row.get("title", "")
+        video_url = row.get("video_url", "")
+        published_at = row.get("published_at", "")
+
+        cache.setdefault(video_id, {})
+        transcript, status = _get_transcript(video_id, cache, args, whisper_model)
+        cache[video_id]["transcript"] = transcript
+        cache[video_id]["transcript_status"] = status
+        cache[video_id]["transcript_truncated"] = bool(
+            transcript and len(transcript) > TRANSCRIPT_MAX_CHARS
+        )
+
+        suggested = ""
+        if not args.transcripts_only and transcript:
+            suggested = _generate_suggested_description(
+                video_id,
+                title,
+                transcript,
+                cache,
+                resolve_model(args.model or None),
+                args.channel_context or None,
+                regenerate=args.regenerate,
+            )
+
+        results.append(
+            {
+                "video_id": video_id,
+                "title": title,
+                "video_url": video_url,
+                "published_at": published_at,
+                "transcript_status": status,
+                "transcript": transcript or "",
+                "suggested_description": suggested,
+                "transcript_truncated": bool(
+                    transcript and len(transcript) > TRANSCRIPT_MAX_CHARS
+                ),
+            }
+        )
+        save_cache(cache, args.cache)
+        write_review_csv(results, args.output_csv)
+        generate_review_html(results, args.output_html)
+
+        if idx < len(missing) - 1:
+            jittered_sleep(args.sleep, args.sleep_jitter)
+        if (
+            args.batch_size > 0
+            and (idx + 1) % args.batch_size == 0
+            and idx < len(missing) - 1
+        ):
+            tqdm.write(f"Batch complete; resting {args.batch_rest}s...")
+            time.sleep(args.batch_rest)
+
+    return results
+
+
+def main() -> None:
+    args = _parse_args()
+    cache_path = Path(args.cache)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache = load_cache(cache_path)
+
+    rows = load_audit_csv(args.input)
+    print(f"Loaded {len(rows)} audit rows; {sum(1 for r in rows if not r.get('has_description', False))} missing descriptions")
+
+    results = _process_videos(rows, args, cache)
+    save_cache(cache, cache_path)
+
+    output_csv = Path(args.output_csv)
+    output_html = Path(args.output_html)
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    output_html.parent.mkdir(parents=True, exist_ok=True)
+
+    write_review_csv(results, output_csv)
+    generate_review_html(results, output_html)
+    print(f"Review reports written: {output_csv}, {output_html}")
+
+
+if __name__ == "__main__":
+    main()
