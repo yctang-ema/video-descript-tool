@@ -10,7 +10,7 @@ source .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
 
 cp .env.example .env
-# Add your OpenCode Zen API key to .env
+# Add your LLM Provider API key (e.g. OpenCode Zen, Anthropic, OpenAI) to .env
 
 # 1. Audit the channel
 python indexer.py --channel-url "https://www.youtube.com/@<handle>/videos"
@@ -26,7 +26,8 @@ Outputs (all written to the `output/` folder):
 
 ## Requirements
 - Python 3.10+
-- OpenCode Zen API key (for description generation only)
+- OpenCode Zen API Key (for description generation only)
+- Note: You can use other LLM API keys but you will need to adjust the .env to reference only specific models offered by your provider.
 - No YouTube API key, Google login, or OAuth needed
 
 ## CLI Options
