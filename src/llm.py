@@ -100,16 +100,45 @@ def _system_prompt(channel_context: str = "") -> str:
     return "\n\n".join(parts)
 
 
+TRUNCATION_MARKER = "\n\n[... middle of transcript omitted for length ...]\n\n"
+
+_HEAD_SHARE = 0.6
+
+
+def sample_transcript(transcript: str, max_chars: int = TRANSCRIPT_MAX_CHARS) -> str:
+    """Reduce ``transcript`` to at most ``max_chars`` characters.
+
+    Transcripts that fit are returned unchanged. Longer ones are sampled from
+    both ends rather than simply cut off at the front: the opening sets up the
+    topic while the closing usually carries conclusions and takeaways, both of
+    which the description needs. The omitted middle is marked explicitly so the
+    model knows the text is not continuous.
+    """
+    if max_chars <= 0 or len(transcript) <= max_chars:
+        return transcript
+
+    budget = max_chars - len(TRUNCATION_MARKER)
+    if budget <= 0:
+        return transcript[:max_chars]
+
+    head_chars = int(budget * _HEAD_SHARE)
+    tail_chars = budget - head_chars
+    head = transcript[:head_chars]
+    tail = transcript[-tail_chars:] if tail_chars > 0 else ""
+    return f"{head}{TRUNCATION_MARKER}{tail}"
+
+
 def _chat(
     client: OpenAI,
     model_name: str,
     title: str,
     transcript: str,
     channel_context: str = "",
+    max_chars: int = TRANSCRIPT_MAX_CHARS,
 ) -> str:
     """Request a description from a single model and return the text."""
     user_message = (
-        f"Video title: {title}\n\nTranscript:\n{transcript[:TRANSCRIPT_MAX_CHARS]}"
+        f"Video title: {title}\n\nTranscript:\n{sample_transcript(transcript, max_chars)}"
         "\n\nWrite a YouTube video description with a hook, "
         "3-5 bullet points, and 3-5 hashtags."
     )
@@ -134,6 +163,7 @@ def generate_description(
     model: str | None = None,
     client: OpenAI | None = None,
     channel_context: str | None = None,
+    max_chars: int = TRANSCRIPT_MAX_CHARS,
 ) -> str:
     """Generate a YouTube description from a title and transcript.
 
@@ -143,6 +173,9 @@ def generate_description(
 
     ``channel_context`` (or the ``CHANNEL_CONTEXT`` env var) optionally
     tailors the prompt persona; leave unset for a domain-agnostic prompt.
+
+    ``max_chars`` bounds how much transcript text is sent to the model; longer
+    transcripts are sampled from both ends by :func:`sample_transcript`.
     """
     global _last_working_model
     client = client or build_client()
@@ -152,7 +185,9 @@ def generate_description(
     last_error: OpenAIError | None = None
     for model_name in candidates:
         try:
-            result = _chat(client, model_name, title, transcript, context)
+            result = _chat(
+                client, model_name, title, transcript, context, max_chars
+            )
         except OpenAIError as exc:
             last_error = exc
             print(

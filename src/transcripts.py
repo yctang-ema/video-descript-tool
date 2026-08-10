@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     NoTranscriptFound,
+    RequestBlocked,
     TranscriptsDisabled,
     VideoUnavailable,
 )
@@ -23,9 +25,27 @@ if TYPE_CHECKING:
 TRANSCRIPT_STATUS_OK = "success"
 TRANSCRIPT_STATUS_DISABLED = "disabled"
 TRANSCRIPT_STATUS_NO_CAPTIONS = "no_captions"
+TRANSCRIPT_STATUS_BLOCKED = "blocked"
 TRANSCRIPT_STATUS_AUDIO = "audio_transcribed"
 TRANSCRIPT_STATUS_AUDIO_FAILED = "audio_failed"
 TRANSCRIPT_STATUS_ERROR = "error"
+
+#: Containers yt-dlp may produce for audio-only downloads.
+AUDIO_EXTENSIONS = (".m4a", ".webm", ".mp3", ".opus", ".ogg", ".mp4", ".aac")
+
+
+def _ytdlp_command() -> list[str]:
+    """Return the command prefix used to invoke yt-dlp.
+
+    Prefers the ``yt-dlp`` executable on PATH, but falls back to running the
+    module with the current interpreter. The fallback matters when the tool is
+    launched via an interpreter path (e.g. ``.venv/bin/python generator.py``)
+    without the virtualenv's ``bin`` directory on PATH.
+    """
+    executable = shutil.which("yt-dlp")
+    if executable:
+        return [executable]
+    return [sys.executable, "-m", "yt_dlp"]
 
 
 def fetch_transcript(
@@ -35,7 +55,13 @@ def fetch_transcript(
     """Fetch a YouTube transcript for ``video_id``.
 
     Returns a tuple ``(transcript_text, status)``. ``status`` is one of:
-    ``success``, ``disabled``, ``no_captions``, ``error``.
+    ``success``, ``disabled``, ``no_captions``, ``blocked``, ``error``.
+
+    ``blocked`` means YouTube refused the request because the caller's IP is
+    rate-limited or banned (``RequestBlocked``/``IpBlocked``). It is a
+    caller-wide condition rather than a per-video one, so it is never retried
+    here: retrying only deepens the ban. Callers should stop requesting
+    captions and switch to the audio fallback instead.
     """
     languages = languages or ["en"]
     try:
@@ -44,11 +70,19 @@ def fetch_transcript(
             max_attempts=3,
             base_delay=1.0,
             retryable=lambda exc: not isinstance(
-                exc, (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable)
+                exc,
+                (
+                    TranscriptsDisabled,
+                    NoTranscriptFound,
+                    VideoUnavailable,
+                    RequestBlocked,
+                ),
             ),
         )
     except TranscriptsDisabled:
         return None, TRANSCRIPT_STATUS_DISABLED
+    except RequestBlocked:
+        return None, TRANSCRIPT_STATUS_BLOCKED
     except (NoTranscriptFound, VideoUnavailable):
         return None, TRANSCRIPT_STATUS_NO_CAPTIONS
     except Exception as exc:
@@ -63,22 +97,37 @@ def fetch_transcript(
     return text.strip(), TRANSCRIPT_STATUS_OK
 
 
-def _download_audio(video_id: str, output_path: Path) -> bool:
-    """Download audio only using yt-dlp."""
+def _download_audio(video_id: str, output_base: Path) -> bool:
+    """Download audio only using yt-dlp.
+
+    ``output_base`` is a path without a file extension; yt-dlp appends the
+    real one. The audio is kept in its native container (usually ``.m4a``)
+    rather than being converted to mp3: conversion requires ffmpeg, while
+    faster-whisper decodes the native container directly via PyAV. This keeps
+    the audio fallback working on machines without ffmpeg installed.
+
+    Returns True if an audio file was produced.
+    """
     url = f"https://www.youtube.com/watch?v={video_id}"
     cmd = [
-        "yt-dlp",
+        *_ytdlp_command(),
         "-f",
         "bestaudio[ext=m4a]/bestaudio",
-        "--extract-audio",
-        "--audio-format",
-        "mp3",
-        "--audio-quality",
-        "0",
         "-o",
-        str(output_path.with_suffix("").with_suffix(".%(ext)s")),
+        f"{output_base}.%(ext)s",
         "--no-playlist",
         "--quiet",
+        "--no-warnings",
+        "--socket-timeout",
+        "30",
+        "--retries",
+        "10",
+        "--fragment-retries",
+        "10",
+        "--retry-sleep",
+        "http:exp=5:120",
+        "--sleep-requests",
+        "1",
         url,
     ]
     try:
@@ -97,12 +146,12 @@ def _download_audio(video_id: str, output_path: Path) -> bool:
             file=sys.stderr,
         )
         return False
-    return output_path.exists()
+    return _find_audio_file(output_base.parent, output_base.name) is not None
 
 
 def _find_audio_file(audio_dir: Path, video_id: str) -> Path | None:
     """Return the downloaded audio file path if it exists."""
-    for ext in (".mp3", ".m4a", ".webm"):
+    for ext in AUDIO_EXTENSIONS:
         candidate = audio_dir / f"{video_id}{ext}"
         if candidate.exists():
             return candidate
@@ -120,7 +169,7 @@ def transcribe_audio(
     """
     audio_dir = Path(audio_dir)
     audio_dir.mkdir(parents=True, exist_ok=True)
-    base_path = audio_dir / f"{video_id}.mp3"
+    base_path = audio_dir / video_id
 
     audio_path = _find_audio_file(audio_dir, video_id)
     if audio_path is None:
@@ -147,7 +196,7 @@ def transcribe_audio(
 def cleanup_temp_audio(video_id: str, audio_dir: Path | str = "temp_audio") -> None:
     """Remove temporary audio files for ``video_id``."""
     audio_dir = Path(audio_dir)
-    for ext in (".mp3", ".m4a", ".webm"):
+    for ext in AUDIO_EXTENSIONS:
         candidate = audio_dir / f"{video_id}{ext}"
         if candidate.exists():
             candidate.unlink()

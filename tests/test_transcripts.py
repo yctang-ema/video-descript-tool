@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from src.transcripts import (
     TRANSCRIPT_STATUS_AUDIO,
     TRANSCRIPT_STATUS_AUDIO_FAILED,
+    TRANSCRIPT_STATUS_BLOCKED,
     TRANSCRIPT_STATUS_DISABLED,
     TRANSCRIPT_STATUS_ERROR,
     TRANSCRIPT_STATUS_NO_CAPTIONS,
@@ -66,19 +67,57 @@ def test_fetch_transcript_unexpected_error(mock_api: MagicMock) -> None:
     assert text is None
 
 
+@patch("src.transcripts.YouTubeTranscriptApi")
+def test_fetch_transcript_blocked(mock_api: MagicMock) -> None:
+    from src.transcripts import RequestBlocked
+
+    mock_api.return_value.fetch.side_effect = RequestBlocked("abc123")
+    text, status = fetch_transcript("abc123")
+    assert status == TRANSCRIPT_STATUS_BLOCKED
+    assert text is None
+
+
+@patch("src.transcripts.YouTubeTranscriptApi")
+def test_fetch_transcript_blocked_is_not_retried(mock_api: MagicMock) -> None:
+    """An IP block is caller-wide, so retrying would only deepen the ban."""
+    from src.transcripts import RequestBlocked
+
+    mock_api.return_value.fetch.side_effect = RequestBlocked("abc123")
+    _text, status = fetch_transcript("abc123")
+    assert status == TRANSCRIPT_STATUS_BLOCKED
+    assert mock_api.return_value.fetch.call_count == 1
+
+
 @patch("src.transcripts.subprocess.run")
 def test_download_audio_success(mock_run: MagicMock, tmp_path: Path) -> None:
-    output_path = tmp_path / "audio.mp3"
-    output_path.write_text("audio data")
-    assert _download_audio("abc123", output_path) is True
+    # yt-dlp appends the real extension to the base path.
+    (tmp_path / "abc123.m4a").write_text("audio data")
+    assert _download_audio("abc123", tmp_path / "abc123") is True
     mock_run.assert_called_once()
+
+
+@patch("src.transcripts.subprocess.run")
+def test_download_audio_does_not_require_ffmpeg(
+    mock_run: MagicMock, tmp_path: Path
+) -> None:
+    """Native audio is kept; mp3 conversion would need ffmpeg."""
+    (tmp_path / "abc123.m4a").write_text("audio data")
+    _download_audio("abc123", tmp_path / "abc123")
+    cmd = mock_run.call_args[0][0]
+    assert "--extract-audio" not in cmd
+    assert "mp3" not in cmd
 
 
 @patch("src.transcripts.subprocess.run")
 def test_download_audio_failure(mock_run: MagicMock, tmp_path: Path) -> None:
     mock_run.side_effect = RuntimeError("boom")
-    output_path = tmp_path / "audio.mp3"
-    assert _download_audio("abc123", output_path) is False
+    assert _download_audio("abc123", tmp_path / "abc123") is False
+
+
+@patch("src.transcripts.subprocess.run")
+def test_download_audio_missing_file(mock_run: MagicMock, tmp_path: Path) -> None:
+    """yt-dlp exiting 0 without producing a file is still a failure."""
+    assert _download_audio("abc123", tmp_path / "abc123") is False
 
 
 def test_transcribe_audio_success(tmp_path: Path) -> None:

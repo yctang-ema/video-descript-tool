@@ -7,7 +7,8 @@ This tool audits a YouTube channel for videos that are missing useful descriptio
 - **Keyless:** No YouTube API key, Google login, or OAuth is required for Tools 1 & 2.
 - **Tool 1 (`indexer.py`):** Uses `yt-dlp` to enumerate a channel and fetch each video's metadata to determine whether the description is missing or too short.
 - **Tool 2 (`generator.py`):** Fetches transcripts with `youtube-transcript-api`, optionally falls back to local Whisper audio transcription, and generates descriptions via the OpenCode Zen LLM endpoint.
-- **Resilience:** network calls in `src/channel.py` and `src/transcripts.py` use `src/retry.py` for exponential-backoff retries, including 429 detection; hung yt-dlp calls are bounded by a `socket_timeout`.
+- **Resilience:** network calls in `src/channel.py` and `src/transcripts.py` use `src/retry.py` for exponential-backoff retries, including 429 detection; hung yt-dlp calls are bounded by a `socket_timeout`. YouTube IP blocks (`RequestBlocked`/`IpBlocked`) are reported as the `blocked` transcript status and deliberately *not* retried, since they are caller-wide; `generator.py` counts consecutive blocks and either switches to audio-only transcription (`--audio-fallback`) or stops early with progress saved.
+- **Audio fallback:** downloaded audio is kept in its native container (`.m4a` etc.) and fed straight to faster-whisper, which decodes it via PyAV. Do not reintroduce mp3 conversion — that would add a hard ffmpeg dependency.
 - **Outputs:** `output/channel_video_audit.csv` (Output 1) and `output/review_report.csv` / `output/review_report.html` (Output 2). Generated files are never committed.
 - **Caching:** `output/llm_cache.json` is keyed by video ID and stores transcripts plus generated descriptions. `generator.py --regenerate` regenerates descriptions while reusing cached transcripts (needed after changing the model or `CHANNEL_CONTEXT`).
 
@@ -25,6 +26,7 @@ This tool audits a YouTube channel for videos that are missing useful descriptio
 video-descript-tool/
 ├── indexer.py              # CLI entry point: Tool 1
 ├── generator.py            # CLI entry point: Tool 2
+├── run_audio_transcripts.sh  # Loops Tool 2 (--transcripts-only --skip-captions) until all audio transcripts are cached
 ├── src/
 │   ├── __init__.py
 │   ├── channel.py          # yt-dlp extraction + audit CSV helpers

@@ -11,11 +11,13 @@ from openai import APIError
 
 import src.llm
 from src.llm import (
+    TRUNCATION_MARKER,
     generate_description,
     load_cache,
     resolve_channel_context,
     resolve_model,
     resolve_models,
+    sample_transcript,
     save_cache,
 )
 
@@ -166,3 +168,53 @@ def test_generate_description_all_models_fail(monkeypatch: pytest.MonkeyPatch) -
 
     with pytest.raises(RuntimeError, match="All LLM models failed"):
         generate_description("Annual Forum", "transcript", model="gpt-5.4-mini", client=client)
+
+
+def test_sample_transcript_short_is_unchanged() -> None:
+    text = "short transcript"
+    assert sample_transcript(text, max_chars=1000) == text
+
+
+def test_sample_transcript_at_limit_is_unchanged() -> None:
+    text = "a" * 100
+    assert sample_transcript(text, max_chars=100) == text
+
+
+def test_sample_transcript_keeps_head_and_tail() -> None:
+    """Long transcripts keep both the opening and the closing takeaways."""
+    text = "HEAD" + ("x" * 5000) + "TAIL"
+    result = sample_transcript(text, max_chars=500)
+
+    assert len(result) <= 500
+    assert result.startswith("HEAD")
+    assert result.endswith("TAIL")
+    assert TRUNCATION_MARKER in result
+
+
+def test_sample_transcript_respects_budget_with_marker() -> None:
+    text = "y" * 100_000
+    for limit in (200, 1000, 20000):
+        assert len(sample_transcript(text, max_chars=limit)) <= limit
+
+
+def test_sample_transcript_tiny_budget_falls_back_to_head() -> None:
+    text = "z" * 1000
+    result = sample_transcript(text, max_chars=10)
+    assert len(result) == 10
+
+
+def test_generate_description_samples_long_transcript() -> None:
+    """The prompt must carry the sampled transcript, not the raw one."""
+    client = MagicMock()
+    client.chat.completions.create.return_value = _FakeCompletion("desc")
+    transcript = "START" + ("q" * 60_000) + "FINISH"
+
+    generate_description(
+        "Title", transcript, model="gpt-5.4-mini", client=client, max_chars=1000
+    )
+
+    _args, kwargs = client.chat.completions.create.call_args
+    user_message = kwargs["messages"][1]["content"]
+    assert "START" in user_message
+    assert "FINISH" in user_message
+    assert len(user_message) < 2000

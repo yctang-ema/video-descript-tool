@@ -71,11 +71,67 @@ Outputs (all written to the `output/` folder):
 | `--regenerate` | `False` | Regenerate descriptions even if already cached (cached transcripts are reused) |
 | `--limit` | `0` | Process N missing-description videos only (0 = all) |
 | `--transcripts-only` | `False` | Fetch transcripts only; do not call LLM |
-| `--audio-fallback` | `False` | Use local Whisper for videos with no captions |
-| `--whisper-model` | `base` | Whisper model size (tiny/base/small/medium) |
+| `--audio-fallback` | `False` | Use local Whisper when captions are unavailable or your IP is blocked |
+| `--skip-captions` | `False` | Bypass the caption API entirely (implies `--audio-fallback`); use when your IP is known to be blocked |
+| `--whisper-model` | `small` | Whisper model size (tiny/base/small/medium) |
+| `--max-consecutive-blocks` | `5` | Stop requesting captions after N consecutive IP-blocked responses (0 disables) |
+| `--max-consecutive-audio-failures` | `5` | Cool down after N consecutive audio failures (0 disables) |
+| `--audio-failure-cooldown` | `180` | Seconds to wait once the audio-failure threshold is hit |
+| `--transcript-max-chars` | `20000` | Max transcript characters sent to the LLM (sampled head+tail) |
 | `--cache` | `output/llm_cache.json` | Cache file for transcripts and LLM output |
 | `--batch-size` | `0` | Transcript batch size; 0 disables batching |
 | `--batch-rest` | `300` | Seconds to rest between transcript batches |
+
+## Troubleshooting
+
+### `IpBlocked` / `RequestBlocked` when fetching transcripts
+YouTube rate-limits the caption endpoint per IP. After many requests you will see
+`IpBlocked: Could not retrieve a transcript ... YouTube is blocking requests from your IP`.
+
+This is a caller-wide condition, not a per-video one, so it is never retried: retrying
+only deepens the block. Such videos are recorded with `transcript_status=blocked`, and
+after `--max-consecutive-blocks` consecutive blocks the run either switches to audio-only
+transcription (with `--audio-fallback`) or stops early with progress saved.
+
+Options, in order of practicality:
+
+1. **Transcribe the audio instead.** Audio is served from a different endpoint and
+   generally keeps working while captions are blocked. If you already know the caption
+   endpoint is blocked, skip it entirely (saves a wasted, timed-out caption attempt on
+   every video):
+   ```bash
+   python generator.py --input output/channel_video_audit.csv --skip-captions
+   ```
+   This needs no API key or proxy. ffmpeg is *not* required — audio is kept in its
+   native container and decoded directly by faster-whisper.
+
+   The audio endpoint is only *intermittently* rate-limited (occasional HTTP 403,
+   which recovers in seconds), unlike the hard per-IP caption block. The built-in
+   audio-failure cooldown backs off when this happens, and failed videos are retried
+   automatically on the next run. To fetch transcripts for a whole channel unattended
+   — re-attempting transiently failed videos until none remain — use:
+   ```bash
+   ./run_audio_transcripts.sh
+   ```
+   It loops `generator.py --transcripts-only --skip-captions` until every
+   missing-description video has a cached transcript. Ctrl+C is safe; progress is
+   saved after every video. Run it again any time to pick up stragglers.
+2. **Wait and resume.** Blocks are usually temporary. Progress is saved after every
+   video, so simply rerunning later resumes where it stopped; cached transcripts are
+   reused and never re-fetched.
+3. **Use a proxy.** See the
+   [Working around IP bans](https://github.com/jdepoix/youtube-transcript-api?tab=readme-ov-file#working-around-ip-bans-requestblocked-or-ipblocked-exception)
+   section of the `youtube-transcript-api` README. Note that datacenter/cloud IPs are
+   largely pre-blocked by YouTube; residential proxies are needed in practice.
+
+Interrupting a run with `Ctrl+C` is always safe — the cache and both reports are written
+after each video.
+
+### Whisper model downloads
+The first `--audio-fallback` run downloads the Whisper weights from Hugging Face and
+prints `You are sending unauthenticated requests to the HF Hub`. This warning is
+harmless and unrelated to YouTube; the weights are cached locally afterwards. Set a
+`HF_TOKEN` (or `HF_HUB_DISABLE_WARNINGS=1`) if you want to silence it.
 
 ## Development
 ```bash
@@ -88,6 +144,6 @@ pytest -q
 - The channel URL is never hardcoded in the source; pass it as a CLI argument or via the `CHANNEL_URL` environment variable.
 - `.env` is gitignored by default. Never commit real API keys or URLs.
 - `output/llm_cache.json` caches transcripts and generated descriptions per video ID. If you change `--model`, `--channel-context`, or `CHANNEL_CONTEXT`, rerun with `--regenerate` to regenerate descriptions while reusing the cached transcripts — no need to delete the cache file or re-fetch transcripts (see the **Regenerating descriptions** section above).
-- Transcripts are truncated to the first **20,000 characters** before being sent to the LLM. The full transcript is still stored in `output/llm_cache.json` and `output/review_report.csv`; only the LLM input is limited. The HTML report shows a note when truncation occurred.
+- Transcripts longer than `--transcript-max-chars` (default **20,000 characters**) are sampled before being sent to the LLM: roughly the first 60% of the budget from the start and the remainder from the end, joined by an explicit omission marker. Sampling both ends keeps the introduction *and* the closing takeaways in view, instead of discarding everything after a hard cut. The full transcript is still stored in `output/llm_cache.json` and `output/review_report.csv`; only the LLM input is limited. The HTML report shows a note when truncation occurred.
 - If the primary LLM model fails (e.g. a provider outage), each model in the comma-separated `LLM_MODEL_FALLBACKS` env var is tried in order; the run only aborts if all candidates fail.
 - `output/channel_video_audit.csv` includes a `status` column. Rows with `status=metadata_failed` are videos whose metadata could not be fetched; they are tracked in the checkpoint so they are not retried forever on `--resume`.

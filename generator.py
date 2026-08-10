@@ -20,6 +20,8 @@ from src.llm import (
 )
 from src.report import generate_review_html, write_review_csv
 from src.transcripts import (
+    TRANSCRIPT_STATUS_AUDIO_FAILED,
+    TRANSCRIPT_STATUS_BLOCKED,
     TRANSCRIPT_STATUS_DISABLED,
     TRANSCRIPT_STATUS_NO_CAPTIONS,
     cleanup_temp_audio,
@@ -83,9 +85,41 @@ def _parse_args() -> argparse.Namespace:
         help="Use local Whisper for videos with no captions",
     )
     parser.add_argument(
+        "--skip-captions",
+        action="store_true",
+        help="Bypass the YouTube caption API entirely (implies --audio-fallback); "
+        "use when your IP is known to be blocked",
+    )
+    parser.add_argument(
         "--whisper-model",
-        default="base",
+        default="small",
         help="Whisper model size (tiny/base/small/medium)",
+    )
+    parser.add_argument(
+        "--max-consecutive-blocks",
+        type=int,
+        default=5,
+        help="Stop requesting captions after N consecutive IP-blocked responses; "
+        "0 disables the check",
+    )
+    parser.add_argument(
+        "--transcript-max-chars",
+        type=int,
+        default=TRANSCRIPT_MAX_CHARS,
+        help="Max transcript characters sent to the LLM (sampled head+tail)",
+    )
+    parser.add_argument(
+        "--max-consecutive-audio-failures",
+        type=int,
+        default=5,
+        help="Cool down briefly after N consecutive audio download/transcription "
+        "failures (sign of audio-endpoint rate limiting); 0 disables the check",
+    )
+    parser.add_argument(
+        "--audio-failure-cooldown",
+        type=int,
+        default=180,
+        help="Seconds to wait once the audio-failure threshold is hit",
     )
     parser.add_argument(
         "--cache",
@@ -131,26 +165,51 @@ def _load_whisper_model(model_size: str) -> Any:
     return WhisperModel(model_size, device="cpu", compute_type="int8")
 
 
+AUDIO_FALLBACK_STATUSES = frozenset(
+    {
+        TRANSCRIPT_STATUS_DISABLED,
+        TRANSCRIPT_STATUS_NO_CAPTIONS,
+        TRANSCRIPT_STATUS_BLOCKED,
+    }
+)
+
+
 def _get_transcript(
     video_id: str,
     cache: dict[str, Any],
     args: argparse.Namespace,
     whisper_model: Any | None,
-) -> tuple[str | None, str]:
-    """Return cached or freshly fetched transcript and its status."""
+    skip_captions: bool = False,
+) -> tuple[str | None, str, bool]:
+    """Return cached or freshly fetched transcript, status, and block flag.
+
+    When ``skip_captions`` is True the caption API is bypassed entirely (the
+    caller has detected an IP block) and the audio fallback is used directly.
+
+    The third element reports whether the *caption* request was blocked. It is
+    tracked separately from ``status`` because a successful audio fallback
+    overwrites the status, which would otherwise hide an ongoing IP block from
+    the caller's circuit breaker.
+    """
     cached = cache.get(video_id, {})
     if cached.get("transcript") and cached.get("transcript_status"):
-        return cached["transcript"], cached["transcript_status"]
+        return cached["transcript"], cached["transcript_status"], False
 
-    transcript, status = fetch_transcript(video_id)
-    if status in {TRANSCRIPT_STATUS_DISABLED, TRANSCRIPT_STATUS_NO_CAPTIONS} and args.audio_fallback:
+    if skip_captions:
+        transcript, status = None, TRANSCRIPT_STATUS_BLOCKED
+    else:
+        transcript, status = fetch_transcript(video_id)
+    captions_blocked = status == TRANSCRIPT_STATUS_BLOCKED
+
+    audio_fallback = args.audio_fallback or getattr(args, "skip_captions", False)
+    if status in AUDIO_FALLBACK_STATUSES and audio_fallback:
         if whisper_model is None:
             whisper_model = _load_whisper_model(args.whisper_model)
         transcript, status = transcribe_audio(video_id, whisper_model)
         if not args.keep_audio:
             cleanup_temp_audio(video_id)
 
-    return transcript, status
+    return transcript, status, captions_blocked
 
 
 def _generate_suggested_description(
@@ -161,6 +220,7 @@ def _generate_suggested_description(
     model: str | None,
     channel_context: str | None,
     regenerate: bool = False,
+    max_chars: int = TRANSCRIPT_MAX_CHARS,
 ) -> str:
     """Return cached or freshly generated description.
 
@@ -172,7 +232,11 @@ def _generate_suggested_description(
         return cached["suggested_description"]
 
     suggested = generate_description(
-        title, transcript, model=model, channel_context=channel_context
+        title,
+        transcript,
+        model=model,
+        channel_context=channel_context,
+        max_chars=max_chars,
     )
     cache.setdefault(video_id, {})
     cache[video_id]["suggested_description"] = suggested
@@ -197,11 +261,17 @@ def _process_videos(
     if args.limit:
         missing = missing[: args.limit]
 
+    # --skip-captions implies audio-only mode.
+    skip_captions = getattr(args, "skip_captions", False)
+    audio_fallback = args.audio_fallback or skip_captions
+
     whisper_model = None
-    if args.audio_fallback:
+    if audio_fallback:
         whisper_model = _load_whisper_model(args.whisper_model)
 
     results: list[dict[str, Any]] = []
+    consecutive_blocks = 0
+    consecutive_audio_failures = 0
     for idx, row in enumerate(tqdm(missing, desc="Processing videos")):
         video_id = row.get("video_id", "")
         title = row.get("title", "")
@@ -209,12 +279,15 @@ def _process_videos(
         published_at = row.get("published_at", "")
 
         cache.setdefault(video_id, {})
-        transcript, status = _get_transcript(video_id, cache, args, whisper_model)
+        transcript, status, captions_blocked = _get_transcript(
+            video_id, cache, args, whisper_model, skip_captions=skip_captions
+        )
         cache[video_id]["transcript"] = transcript
         cache[video_id]["transcript_status"] = status
-        cache[video_id]["transcript_truncated"] = bool(
-            transcript and len(transcript) > TRANSCRIPT_MAX_CHARS
+        truncated = bool(
+            transcript and len(transcript) > args.transcript_max_chars
         )
+        cache[video_id]["transcript_truncated"] = truncated
 
         suggested = ""
         if not args.transcripts_only and transcript:
@@ -226,6 +299,7 @@ def _process_videos(
                 resolve_model(args.model or None),
                 args.channel_context or None,
                 regenerate=args.regenerate,
+                max_chars=args.transcript_max_chars,
             )
 
         results.append(
@@ -237,14 +311,54 @@ def _process_videos(
                 "transcript_status": status,
                 "transcript": transcript or "",
                 "suggested_description": suggested,
-                "transcript_truncated": bool(
-                    transcript and len(transcript) > TRANSCRIPT_MAX_CHARS
-                ),
+                "transcript_truncated": truncated,
             }
         )
         save_cache(cache, args.cache)
         write_review_csv(results, args.output_csv)
         generate_review_html(results, args.output_html)
+
+        if captions_blocked:
+            consecutive_blocks += 1
+        else:
+            consecutive_blocks = 0
+
+        if status == TRANSCRIPT_STATUS_AUDIO_FAILED:
+            consecutive_audio_failures += 1
+        else:
+            consecutive_audio_failures = 0
+
+        if (
+            args.max_consecutive_audio_failures > 0
+            and consecutive_audio_failures >= args.max_consecutive_audio_failures
+        ):
+            tqdm.write(
+                f"{consecutive_audio_failures} audio downloads failed in a row "
+                f"(audio endpoint may be rate-limiting); cooling down "
+                f"{args.audio_failure_cooldown}s then continuing."
+            )
+            time.sleep(args.audio_failure_cooldown)
+            consecutive_audio_failures = 0
+
+        if (
+            args.max_consecutive_blocks > 0
+            and not skip_captions
+            and consecutive_blocks >= args.max_consecutive_blocks
+        ):
+            if audio_fallback:
+                tqdm.write(
+                    f"YouTube blocked {consecutive_blocks} caption requests in a row; "
+                    "skipping the caption API and using audio transcription only."
+                )
+                skip_captions = True
+            else:
+                tqdm.write(
+                    f"Stopping: YouTube blocked {consecutive_blocks} caption requests "
+                    "in a row (your IP is rate-limited). Progress is saved; rerun "
+                    "later to resume, or use --audio-fallback to transcribe audio "
+                    "instead of captions."
+                )
+                break
 
         if idx < len(missing) - 1:
             jittered_sleep(args.sleep, args.sleep_jitter)
