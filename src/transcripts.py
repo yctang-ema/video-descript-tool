@@ -119,7 +119,11 @@ def _download_audio(
     cmd = [
         *_ytdlp_command(),
         "-f",
-        "bestaudio[ext=m4a]/bestaudio",
+        # Prefer m4a but accept any audio-only (or, as a last resort, any)
+        # format: under IP rate-limiting YouTube intermittently withholds
+        # specific formats/containers, so a rigid selector needlessly fails
+        # when a usable webm/opus stream is available.
+        "bestaudio[ext=m4a]/bestaudio/best",
         "-o",
         f"{output_base}.%(ext)s",
         "--no-playlist",

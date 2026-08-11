@@ -77,15 +77,17 @@ PY
     if [ -n "${YT_COOKIES:-}" ] && [ -f "${YT_COOKIES}" ]; then
         COOKIE_ARGS=(--cookies "$YT_COOKIES")
     fi
+    # Gentle pacing: rate (not volume) is what trips YouTube's anti-bot wall,
+    # and these downloads share the IP that was already blocked once.
     "$PYTHON" generator.py \
         --input "$INPUT" \
         --transcripts-only \
         --skip-captions \
         --whisper-model small \
         --max-consecutive-audio-failures 5 \
-        --audio-failure-cooldown 180 \
+        --audio-failure-cooldown 300 \
         ${COOKIE_ARGS[@]+"${COOKIE_ARGS[@]}"} \
-        --sleep 0.3 --sleep-jitter 0.3
+        --sleep 1.0 --sleep-jitter 1.0
 
     echo "=== pass $PASS complete; pausing ${SLEEP_BETWEEN_PASSES}s before recheck ==="
     sleep "$SLEEP_BETWEEN_PASSES"
