@@ -19,7 +19,11 @@ from src.llm import (
     resolve_model,
     save_cache,
 )
-from src.report import generate_review_html, write_review_csv
+from src.report import (
+    build_combined_results,
+    generate_review_html,
+    write_review_csv,
+)
 from src.transcripts import (
     TRANSCRIPT_STATUS_AUDIO_FAILED,
     TRANSCRIPT_STATUS_BLOCKED,
@@ -51,6 +55,16 @@ def _parse_args() -> argparse.Namespace:
         "--output-html",
         default="output/review_report.html",
         help="Review HTML output path",
+    )
+    parser.add_argument(
+        "--combined-csv",
+        default="output/combined_review_report.csv",
+        help="Combined CSV (all cached videos with a transcript) output path",
+    )
+    parser.add_argument(
+        "--combined-html",
+        default="output/combined_review_report.html",
+        help="Combined HTML (all cached videos with a transcript) output path",
     )
     parser.add_argument(
         "--model",
@@ -268,7 +282,31 @@ def _process_videos(
         if row.get("status", "ok") == "ok" and not row.get("has_description", False)
     ]
     if args.limit:
-        missing = missing[: args.limit]
+        # --limit caps how many *new* (not-yet-cached) videos to process.
+        # Counting only uncached rows matters: without it, a canary run such as
+        # ``--limit 5`` would just replay the first five already-cached videos,
+        # perform zero new downloads, and misleadingly shrink the review report
+        # to those five rows.
+        uncached = [
+            row
+            for row in missing
+            if not (
+                cache.get(row.get("video_id", "").strip().strip("'\""), {}).get(
+                    "transcript"
+                )
+                and cache.get(
+                    row.get("video_id", "").strip().strip("'\""), {}
+                ).get("transcript_status")
+            )
+        ]
+        fresh = set()
+        for row in uncached[: args.limit]:
+            fresh.add(row.get("video_id", "").strip().strip("'\""))
+        missing = [
+            row
+            for row in missing
+            if row.get("video_id", "").strip().strip("'\"") in fresh
+        ]
 
     # --skip-captions implies audio-only mode.
     skip_captions = getattr(args, "skip_captions", False)
@@ -414,6 +452,20 @@ def main() -> None:
     write_review_csv(results, output_csv)
     generate_review_html(results, output_html)
     print(f"Review reports written: {output_csv}, {output_html}")
+
+    # Combined report across every cached video with a transcript. Unlike the
+    # per-run report above (which reflects only this run), this always shows the
+    # full set of work completed so far, so a small --limit run never looks like
+    # it "wiped" earlier progress.
+    combined = build_combined_results(rows, cache)
+    combined_csv = Path(args.combined_csv)
+    combined_html = Path(args.combined_html)
+    write_review_csv(combined, combined_csv)
+    generate_review_html(combined, combined_html)
+    print(
+        f"Combined reports written ({len(combined)} videos with transcripts): "
+        f"{combined_csv}, {combined_html}"
+    )
 
 
 if __name__ == "__main__":

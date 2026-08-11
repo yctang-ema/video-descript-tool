@@ -64,12 +64,14 @@ Outputs (all written to the `output/` folder):
 | Flag | Default | Description |
 |---|---|---|
 | `--input` | `output/channel_video_audit.csv` | Audit CSV path |
-| `--output-csv` | `output/review_report.csv` | Review CSV output |
-| `--output-html` | `output/review_report.html` | Review HTML output |
+| `--output-csv` | `output/review_report.csv` | Review CSV output (current run only) |
+| `--output-html` | `output/review_report.html` | Review HTML output (current run only) |
+| `--combined-csv` | `output/combined_review_report.csv` | Combined CSV: every cached video with a transcript |
+| `--combined-html` | `output/combined_review_report.html` | Combined HTML: every cached video with a transcript |
 | `--model` | from `LLM_MODEL` env | Model name passed to OpenCode Zen |
 | `--channel-context` | from `CHANNEL_CONTEXT` env | Optional free-form channel context (audience, tone, priorities) injected into the LLM prompt; generic, domain-agnostic prompt if unset |
 | `--regenerate` | `False` | Regenerate descriptions even if already cached (cached transcripts are reused) |
-| `--limit` | `0` | Process N missing-description videos only (0 = all) |
+| `--limit` | `0` | Process only N *uncached* missing-description videos (0 = all). Cached videos are skipped, so this counts fresh work — ideal for a small canary run on a fresh IP |
 | `--transcripts-only` | `False` | Fetch transcripts only; do not call LLM |
 | `--audio-fallback` | `False` | Use local Whisper when captions are unavailable or your IP is blocked |
 | `--skip-captions` | `False` | Bypass the caption API entirely (implies `--audio-fallback`); use when your IP is known to be blocked |
@@ -179,4 +181,5 @@ pytest -q
 - `output/llm_cache.json` caches transcripts and generated descriptions per video ID. If you change `--model`, `--channel-context`, or `CHANNEL_CONTEXT`, rerun with `--regenerate` to regenerate descriptions while reusing the cached transcripts — no need to delete the cache file or re-fetch transcripts (see the **Regenerating descriptions** section above).
 - Transcripts longer than `--transcript-max-chars` (default **20,000 characters**) are sampled before being sent to the LLM: roughly the first 60% of the budget from the start and the remainder from the end, joined by an explicit omission marker. Sampling both ends keeps the introduction *and* the closing takeaways in view, instead of discarding everything after a hard cut. The full transcript is still stored in `output/llm_cache.json` and `output/review_report.csv`; only the LLM input is limited. The HTML report shows a note when truncation occurred.
 - If the primary LLM model fails (e.g. a provider outage), each model in the comma-separated `LLM_MODEL_FALLBACKS` env var is tried in order; the run only aborts if all candidates fail.
+- The review report (`review_report.csv`/`.html`) contains **only the videos processed in the current run**. The full set of transcripts lives in `output/llm_cache.json` and is never wiped by a run — a small `--limit` run will show few rows in the report even though earlier transcripts are still safely cached. Each run also writes a **combined report** (`combined_review_report.csv`/`.html`) covering *every* cached video that has a transcript, so the complete picture is always available regardless of `--limit`. Videos whose transcript failed (`audio_failed`/`blocked`/`error`) carry no transcript and are automatically retried on the next run.
 - `output/channel_video_audit.csv` includes a `status` column. Rows with `status=metadata_failed` are videos whose metadata could not be fetched; they are tracked in the checkpoint so they are not retried forever on `--resume`.

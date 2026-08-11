@@ -7,6 +7,8 @@ import html
 from pathlib import Path
 from typing import Any
 
+from src.llm import TRANSCRIPT_MAX_CHARS
+
 REVIEW_COLUMNS = [
     "video_id",
     "title",
@@ -34,6 +36,46 @@ def _csv_safe(value: Any) -> str:
     if stripped and stripped[0] in {"=", "+", "-", "@"}:
         return "'" + text
     return text
+
+
+def build_combined_results(
+    rows: list[dict[str, Any]], cache: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Build review rows for every missing-description video with a transcript.
+
+    Unlike the per-run report (which shows only the videos processed in the
+    current run), this merges the cache so the combined report reflects *all*
+    work done so far. Only videos with a usable transcript are included; failed
+    entries (``audio_failed``/``blocked``/``error``) carry no transcript and are
+    retried on the next run, so they are omitted here.
+    """
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("status", "ok") != "ok" or row.get("has_description", False):
+            continue
+        video_id = row.get("video_id", "").strip().strip("'\"")
+        entry = cache.get(video_id, {})
+        transcript = entry.get("transcript")
+        if not transcript:
+            continue
+        results.append(
+            {
+                "video_id": video_id,
+                "title": row.get("title", ""),
+                "video_url": row.get("video_url", ""),
+                "published_at": row.get("published_at", ""),
+                "transcript_status": entry.get("transcript_status", ""),
+                "transcript": transcript,
+                "transcript_truncated": bool(
+                    entry.get(
+                        "transcript_truncated",
+                        len(transcript) > TRANSCRIPT_MAX_CHARS,
+                    )
+                ),
+                "suggested_description": entry.get("suggested_description", ""),
+            }
+        )
+    return results
 
 
 def write_review_csv(rows: list[dict[str, Any]], output_path: Path | str) -> None:

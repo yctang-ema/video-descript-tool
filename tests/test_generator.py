@@ -228,6 +228,52 @@ def test_process_videos_generates_descriptions(
 @patch("generator.write_review_csv")
 @patch("generator.generate_review_html")
 @patch("generator.save_cache")
+@patch("generator.transcribe_audio")
+@patch("generator.cleanup_temp_audio")
+@patch("generator._load_whisper_model")
+@patch("generator.jittered_sleep")
+@patch("generator.tqdm")
+def test_process_videos_limit_counts_only_uncached(
+    mock_tqdm: MagicMock,
+    mock_sleep: MagicMock,
+    mock_load_whisper: MagicMock,
+    mock_cleanup: MagicMock,
+    mock_transcribe: MagicMock,
+    mock_save_cache: MagicMock,
+    mock_html: MagicMock,
+    mock_csv: MagicMock,
+) -> None:
+    """--limit N must process N *new* videos, skipping ones already cached.
+
+    Regression test: previously ``--limit 5`` sliced the first five rows, which
+    were already cached, so a canary run performed zero new downloads and the
+    report misleadingly shrank to five stale rows.
+    """
+    mock_tqdm.side_effect = lambda iterable, **kwargs: iterable
+    mock_tqdm.write = MagicMock()
+    mock_transcribe.return_value = ("audio text", "audio_transcribed")
+
+    rows = _make_rows(10)
+    # First 3 are already transcribed.
+    cache: dict[str, Any] = {
+        f"vid{i}": {"transcript": "cached", "transcript_status": "audio_transcribed"}
+        for i in range(3)
+    }
+    args = _make_args(skip_captions=True, transcripts_only=True, limit=5)
+
+    results = _process_videos(rows, args, cache)
+
+    processed_ids = [r["video_id"] for r in results]
+    # 5 new videos, none of them the cached first three.
+    assert len(results) == 5
+    assert not any(vid in processed_ids for vid in ("vid0", "vid1", "vid2"))
+    # And it actually attempted 5 fresh downloads.
+    assert mock_transcribe.call_count == 5
+
+
+@patch("generator.write_review_csv")
+@patch("generator.generate_review_html")
+@patch("generator.save_cache")
 @patch("generator.fetch_transcript")
 @patch("generator.jittered_sleep")
 @patch("generator.tqdm")
