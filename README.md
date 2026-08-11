@@ -74,6 +74,7 @@ Outputs (all written to the `output/` folder):
 | `--audio-fallback` | `False` | Use local Whisper when captions are unavailable or your IP is blocked |
 | `--skip-captions` | `False` | Bypass the caption API entirely (implies `--audio-fallback`); use when your IP is known to be blocked |
 | `--whisper-model` | `small` | Whisper model size (tiny/base/small/medium) |
+| `--cookies` | (none) | Path to a Netscape `cookies.txt` for audio downloads; passes YouTube's anti-bot check when your IP is rate-limited |
 | `--max-consecutive-blocks` | `5` | Stop requesting captions after N consecutive IP-blocked responses (0 disables) |
 | `--max-consecutive-audio-failures` | `5` | Cool down after N consecutive audio failures (0 disables) |
 | `--audio-failure-cooldown` | `180` | Seconds to wait once the audio-failure threshold is hit |
@@ -123,6 +124,38 @@ Options, in order of practicality:
    [Working around IP bans](https://github.com/jdepoix/youtube-transcript-api?tab=readme-ov-file#working-around-ip-bans-requestblocked-or-ipblocked-exception)
    section of the `youtube-transcript-api` README. Note that datacenter/cloud IPs are
    largely pre-blocked by YouTube; residential proxies are needed in practice.
+
+### `Sign in to confirm you're not a bot` (audio downloads)
+After sustained downloading, YouTube may escalate from transient `403`s to a full
+anti-bot wall: every yt-dlp request — metadata *and* audio — returns
+`Sign in to confirm you're not a bot`, even for videos that worked minutes earlier.
+This is a stronger, per-IP block than the intermittent 403s.
+
+What works and what doesn't:
+
+- **Waiting is the only cost-free fix.** These blocks are temporary; resume later with
+  `./run_audio_transcripts.sh` and it picks up the stragglers from the cache.
+- **Pass a `cookies.txt` file to keep going now.** `--cookies-from-browser` is
+  unreliable on macOS because Chrome's cookies are encrypted (v10) and cannot be
+  decrypted without Keychain access. Instead export cookies to a file:
+  1. In Chrome, install a "Get cookies.txt LOCALLY" extension.
+  2. Open `https://www.youtube.com` while signed in, export `cookies.txt`.
+  3. Run with the file (treat it as a secret — do not commit it):
+     ```bash
+     python generator.py --input output/channel_video_audit.csv \
+       --transcripts-only --skip-captions --cookies /path/to/cookies.txt
+     ```
+  4. Or set it in `.env` for the loop script: `YT_COOKIES=/path/to/cookies.txt`.
+- **Slower pacing reduces recurrence.** Increase `--sleep`/`--sleep-jitter` and the
+  audio-failure cooldown to lower the request rate.
+
+### Video IDs that start with `-` failed with `audio download failed`
+Older indexer versions applied a spreadsheet formula guard to the `video_id` column,
+prepending an apostrophe to IDs starting with `-` (e.g. `'-acRraKkZfU`). Tool 2 then
+built a download URL for the wrong ID. This is fixed: the indexer no longer alters
+`video_id`, and the generator strips stray quotes defensively. If your audit CSV was
+produced by an affected version, repair it once by stripping leading `'`/`"` from the
+`video_id` column and deleting the corresponding poisoned cache keys.
 
 Interrupting a run with `Ctrl+C` is always safe — the cache and both reports are written
 after each video.

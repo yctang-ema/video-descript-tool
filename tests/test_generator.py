@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -37,6 +38,7 @@ def _make_args(**overrides: Any) -> SimpleNamespace:
         "skip_captions": False,
         "max_consecutive_audio_failures": 5,
         "audio_failure_cooldown": 180,
+        "cookies": "",
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -330,6 +332,78 @@ def test_process_videos_skip_captions_never_calls_api(
     mock_fetch.assert_not_called()
     assert mock_transcribe.call_count == 6
     assert all(r["transcript"] == "audio text" for r in results)
+
+
+@patch("generator.write_review_csv")
+@patch("generator.generate_review_html")
+@patch("generator.save_cache")
+@patch("generator.transcribe_audio")
+@patch("generator.cleanup_temp_audio")
+@patch("generator._load_whisper_model")
+@patch("generator.jittered_sleep")
+@patch("generator.tqdm")
+def test_process_videos_passes_cookies_to_transcribe(
+    mock_tqdm: MagicMock,
+    mock_sleep: MagicMock,
+    mock_load_whisper: MagicMock,
+    mock_cleanup: MagicMock,
+    mock_transcribe: MagicMock,
+    mock_save_cache: MagicMock,
+    mock_html: MagicMock,
+    mock_csv: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """A valid --cookies path is forwarded to the audio download."""
+    mock_tqdm.side_effect = lambda iterable, **kwargs: iterable
+    mock_tqdm.write = MagicMock()
+    mock_transcribe.return_value = ("audio text", "audio_transcribed")
+    cookie_file = tmp_path / "cookies.txt"
+    cookie_file.write_text("# Netscape HTTP Cookie File\n")
+
+    rows = _make_rows(2)
+    args = _make_args(
+        skip_captions=True, transcripts_only=True, cookies=str(cookie_file)
+    )
+    _process_videos(rows, args, {})
+
+    assert mock_transcribe.call_count == 2
+    # cookies kwarg is the resolved Path, not the raw string
+    assert mock_transcribe.call_args[1]["cookies"] == cookie_file
+
+
+@patch("generator.write_review_csv")
+@patch("generator.generate_review_html")
+@patch("generator.save_cache")
+@patch("generator.transcribe_audio")
+@patch("generator.cleanup_temp_audio")
+@patch("generator._load_whisper_model")
+@patch("generator.jittered_sleep")
+@patch("generator.tqdm")
+def test_process_videos_missing_cookies_file_falls_back(
+    mock_tqdm: MagicMock,
+    mock_sleep: MagicMock,
+    mock_load_whisper: MagicMock,
+    mock_cleanup: MagicMock,
+    mock_transcribe: MagicMock,
+    mock_save_cache: MagicMock,
+    mock_html: MagicMock,
+    mock_csv: MagicMock,
+    tmp_path: Path,
+) -> None:
+    """A nonexistent --cookies path warns and proceeds without cookies."""
+    mock_tqdm.side_effect = lambda iterable, **kwargs: iterable
+    mock_tqdm.write = MagicMock()
+    mock_transcribe.return_value = ("audio text", "audio_transcribed")
+
+    rows = _make_rows(1)
+    args = _make_args(
+        skip_captions=True,
+        transcripts_only=True,
+        cookies=str(tmp_path / "does-not-exist.txt"),
+    )
+    _process_videos(rows, args, {})
+
+    assert mock_transcribe.call_args[1]["cookies"] is None
 
 
 @patch("generator.write_review_csv")

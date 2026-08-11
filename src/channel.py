@@ -144,10 +144,14 @@ def write_audit_csv(entries: list[dict[str, Any]], output_path: Path | str) -> N
         for entry in entries:
             writer.writerow(
                 {
-                    "video_id": _csv_safe(entry.get("video_id")),
+                    # video_id is a machine identifier consumed by Tool 2 and
+                    # used to build download URLs; it must never be altered, or
+                    # IDs starting with "-" would be corrupted by the formula
+                    # guard. Only free-text fields (title) get _csv_safe.
+                    "video_id": entry.get("video_id"),
                     "title": _csv_safe(entry.get("title")),
                     "published_at": _csv_safe(entry.get("published_at")),
-                    "video_url": _csv_safe(entry.get("video_url")),
+                    "video_url": entry.get("video_url"),
                     "has_description": _csv_safe(entry.get("has_description")),
                     "description_length": _csv_safe(entry.get("description_length")),
                     "status": _csv_safe(entry.get("status", "ok")),
@@ -171,10 +175,11 @@ def append_audit_csv_row(entry: dict[str, Any], output_path: Path | str) -> None
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writerow(
             {
-                "video_id": _csv_safe(entry.get("video_id")),
+                # See write_audit_csv: never alter video_id.
+                "video_id": entry.get("video_id"),
                 "title": _csv_safe(entry.get("title")),
                 "published_at": _csv_safe(entry.get("published_at")),
-                "video_url": _csv_safe(entry.get("video_url")),
+                "video_url": entry.get("video_url"),
                 "has_description": _csv_safe(entry.get("has_description")),
                 "description_length": _csv_safe(entry.get("description_length")),
                 "status": _csv_safe(entry.get("status", "ok")),

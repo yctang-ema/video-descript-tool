@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -94,6 +95,13 @@ def _parse_args() -> argparse.Namespace:
         "--whisper-model",
         default="small",
         help="Whisper model size (tiny/base/small/medium)",
+    )
+    parser.add_argument(
+        "--cookies",
+        default="",
+        help="Path to a Netscape cookies.txt file (exported from a browser) used "
+        "for audio downloads, to pass YouTube's 'sign in to confirm you're not a "
+        "bot' check when your IP is rate-limited",
     )
     parser.add_argument(
         "--max-consecutive-blocks",
@@ -205,7 +213,8 @@ def _get_transcript(
     if status in AUDIO_FALLBACK_STATUSES and audio_fallback:
         if whisper_model is None:
             whisper_model = _load_whisper_model(args.whisper_model)
-        transcript, status = transcribe_audio(video_id, whisper_model)
+        cookies = getattr(args, "cookies", None) or None
+        transcript, status = transcribe_audio(video_id, whisper_model, cookies=cookies)
         if not args.keep_audio:
             cleanup_temp_audio(video_id)
 
@@ -265,6 +274,14 @@ def _process_videos(
     skip_captions = getattr(args, "skip_captions", False)
     audio_fallback = args.audio_fallback or skip_captions
 
+    # Resolve the cookies path once and normalise it back onto args so
+    # _get_transcript sees a validated Path (or None if the file is missing).
+    cookies = Path(args.cookies) if getattr(args, "cookies", "") else None
+    if cookies is not None and not cookies.exists():
+        print(f"Warning: --cookies file not found: {cookies}", file=sys.stderr)
+        cookies = None
+    args.cookies = cookies
+
     whisper_model = None
     if audio_fallback:
         whisper_model = _load_whisper_model(args.whisper_model)
@@ -273,7 +290,11 @@ def _process_videos(
     consecutive_blocks = 0
     consecutive_audio_failures = 0
     for idx, row in enumerate(tqdm(missing, desc="Processing videos")):
-        video_id = row.get("video_id", "")
+        # Strip stray quotes/whitespace: the audit CSV may carry a leading
+        # apostrophe on IDs that start with "-" (a spreadsheet formula guard
+        # applied by older indexer versions), which would otherwise corrupt
+        # the download URL.
+        video_id = row.get("video_id", "").strip().strip("'\"")
         title = row.get("title", "")
         video_url = row.get("video_url", "")
         published_at = row.get("published_at", "")

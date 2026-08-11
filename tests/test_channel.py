@@ -74,6 +74,50 @@ def test_write_and_load_audit_csv(tmp_path: Path):
     assert loaded[1]["status"] == "ok"
 
 
+def test_audit_csv_preserves_video_ids_starting_with_dash(tmp_path: Path):
+    """Regression: video_id is a machine identifier and must never be altered.
+
+    A spreadsheet formula-injection guard (``_csv_safe``) used to prepend an
+    apostrophe to any cell starting with ``-``; applied to video_id it corrupted
+    real YouTube IDs such as ``-acRraKkZfU``, breaking Tool 2 downloads.
+    """
+    rows = [
+        {
+            "video_id": "-acRraKkZfU",
+            "title": "Some title",
+            "published_at": "2025-11-05",
+            "video_url": "https://www.youtube.com/watch?v=-acRraKkZfU",
+            "has_description": False,
+            "description_length": 0,
+            "status": "ok",
+        }
+    ]
+    path = tmp_path / "audit.csv"
+    write_audit_csv(rows, path)
+    loaded = load_audit_csv(path)
+    assert loaded[0]["video_id"] == "-acRraKkZfU"
+    assert loaded[0]["video_url"] == "https://www.youtube.com/watch?v=-acRraKkZfU"
+
+
+def test_audit_csv_still_sanitises_title_formula(tmp_path: Path):
+    """The formula-injection guard must still apply to free-text titles."""
+    rows = [
+        {
+            "video_id": "abc123",
+            "title": "=HYPERLINK(\"http://evil\")",
+            "published_at": "2024-01-15",
+            "video_url": "https://www.youtube.com/watch?v=abc123",
+            "has_description": False,
+            "description_length": 0,
+            "status": "ok",
+        }
+    ]
+    path = tmp_path / "audit.csv"
+    write_audit_csv(rows, path)
+    loaded = load_audit_csv(path)
+    assert loaded[0]["title"].startswith("'")
+
+
 def test_write_and_load_audit_csv_with_failed_status(tmp_path: Path):
     rows = [
         {

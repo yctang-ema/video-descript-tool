@@ -97,7 +97,9 @@ def fetch_transcript(
     return text.strip(), TRANSCRIPT_STATUS_OK
 
 
-def _download_audio(video_id: str, output_base: Path) -> bool:
+def _download_audio(
+    video_id: str, output_base: Path, cookies: Path | None = None
+) -> bool:
     """Download audio only using yt-dlp.
 
     ``output_base`` is a path without a file extension; yt-dlp appends the
@@ -105,6 +107,11 @@ def _download_audio(video_id: str, output_base: Path) -> bool:
     rather than being converted to mp3: conversion requires ffmpeg, while
     faster-whisper decodes the native container directly via PyAV. This keeps
     the audio fallback working on machines without ffmpeg installed.
+
+    ``cookies`` optionally points to a Netscape-format ``cookies.txt`` file
+    (exported from a browser). Supplying it lets yt-dlp pass YouTube's
+    "sign in to confirm you're not a bot" check when the caller's IP is
+    rate-limited.
 
     Returns True if an audio file was produced.
     """
@@ -128,8 +135,10 @@ def _download_audio(video_id: str, output_base: Path) -> bool:
         "http:exp=5:120",
         "--sleep-requests",
         "1",
-        url,
     ]
+    if cookies is not None:
+        cmd += ["--cookies", str(cookies)]
+    cmd.append(url)
     try:
         subprocess.run(
             cmd, check=True, capture_output=True, text=True, timeout=300
@@ -162,8 +171,12 @@ def transcribe_audio(
     video_id: str,
     model: WhisperModel,
     audio_dir: Path | str = "temp_audio",
+    cookies: Path | None = None,
 ) -> tuple[str | None, str]:
     """Download audio and transcribe it with a faster-whisper model.
+
+    ``cookies`` optionally points to a ``cookies.txt`` file used for the
+    download (see :func:`_download_audio`).
 
     Returns ``(transcript_text, status)``.
     """
@@ -173,7 +186,7 @@ def transcribe_audio(
 
     audio_path = _find_audio_file(audio_dir, video_id)
     if audio_path is None:
-        if not _download_audio(video_id, base_path):
+        if not _download_audio(video_id, base_path, cookies=cookies):
             return None, TRANSCRIPT_STATUS_AUDIO_FAILED
         audio_path = _find_audio_file(audio_dir, video_id)
     if audio_path is None:
@@ -188,6 +201,10 @@ def transcribe_audio(
             f"{type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
+        # The audio file may be a partial/corrupt download left behind by an
+        # interrupted run. Delete it so the next run re-downloads it cleanly
+        # instead of reusing (and failing on) the same bad file forever.
+        cleanup_temp_audio(video_id, audio_dir)
         return None, TRANSCRIPT_STATUS_AUDIO_FAILED
 
     return text.strip(), TRANSCRIPT_STATUS_AUDIO

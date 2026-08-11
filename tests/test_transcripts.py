@@ -152,6 +152,26 @@ def test_transcribe_audio_failure(tmp_path: Path) -> None:
     assert text is None
 
 
+def test_transcribe_audio_failure_deletes_partial_file(tmp_path: Path) -> None:
+    """A corrupt/partial download must not be reused on the next run.
+
+    Regression test: a file left behind by an interrupted download used to be
+    picked up by ``_find_audio_file`` and fed to Whisper again, failing forever.
+    The failure path now removes it so the next run re-downloads cleanly.
+    """
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+    partial = audio_dir / "abc123.m4a"
+    partial.write_text("partial-garbage")
+
+    model = MagicMock()
+    model.transcribe.side_effect = RuntimeError("cannot decode")
+
+    text, status = transcribe_audio("abc123", model, audio_dir=audio_dir)
+    assert status == TRANSCRIPT_STATUS_AUDIO_FAILED
+    assert not partial.exists()
+
+
 def test_cleanup_temp_audio(tmp_path: Path) -> None:
     audio_dir = tmp_path / "audio"
     audio_dir.mkdir()

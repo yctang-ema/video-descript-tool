@@ -22,6 +22,15 @@ if [ ! -x "$PYTHON" ]; then
     exit 1
 fi
 
+# Optional: a cookies.txt path exported in .env (YT_COOKIES=...) lets downloads
+# pass YouTube's anti-bot check when the IP is rate-limited. Load it if present.
+if [ -f .env ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . ./.env
+    set +a
+fi
+
 INPUT="output/channel_video_audit.csv"
 CACHE="output/llm_cache.json"
 PASS=0
@@ -64,6 +73,10 @@ PY
     # the blocked caption endpoint); the built-in cooldown backs off when the
     # audio endpoint starts rate-limiting. We do not stop on a non-zero exit so
     # a single bad video does not abort the whole loop.
+    COOKIE_ARGS=()
+    if [ -n "${YT_COOKIES:-}" ] && [ -f "${YT_COOKIES}" ]; then
+        COOKIE_ARGS=(--cookies "$YT_COOKIES")
+    fi
     "$PYTHON" generator.py \
         --input "$INPUT" \
         --transcripts-only \
@@ -71,6 +84,7 @@ PY
         --whisper-model small \
         --max-consecutive-audio-failures 5 \
         --audio-failure-cooldown 180 \
+        ${COOKIE_ARGS[@]+"${COOKIE_ARGS[@]}"} \
         --sleep 0.3 --sleep-jitter 0.3
 
     echo "=== pass $PASS complete; pausing ${SLEEP_BETWEEN_PASSES}s before recheck ==="
