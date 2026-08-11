@@ -27,6 +27,7 @@ video-descript-tool/
 ├── indexer.py              # CLI entry point: Tool 1
 ├── generator.py            # CLI entry point: Tool 2
 ├── run_audio_transcripts.sh  # Loops Tool 2 (--transcripts-only --skip-captions) until all audio transcripts are cached
+├── check_status.sh           # Self-diagnostic: checks if the current run is healthy, slow, or stuck
 ├── src/
 │   ├── __init__.py
 │   ├── channel.py          # yt-dlp extraction + audit CSV helpers

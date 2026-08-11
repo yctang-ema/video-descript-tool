@@ -119,6 +119,10 @@ Options, in order of practicality:
    It loops `generator.py --transcripts-only --skip-captions` until every
    missing-description video has a cached transcript. Ctrl+C is safe; progress is
    saved after every video. Run it again any time to pick up stragglers.
+
+   To self-check whether a run is healthy, slow, or stuck, open a second terminal
+   in the same directory and run `./check_status.sh` (or `./check_status.sh --watch`
+   for a repeating check every 30s).
 2. **Wait and resume.** Blocks are usually temporary. Progress is saved after every
    video, so simply rerunning later resumes where it stopped; cached transcripts are
    reused and never re-fetched.
