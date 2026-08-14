@@ -87,9 +87,12 @@ def write_review_csv(rows: list[dict[str, Any]], output_path: Path | str) -> Non
         for row in rows:
             writer.writerow(
                 {
-                    "video_id": _csv_safe(row.get("video_id")),
+                    # video_id and video_url are machine identifiers consumed by
+                    # downstream tools; they must never be altered, or IDs/URLs
+                    # starting with "-" would be corrupted by the formula guard.
+                    "video_id": row.get("video_id"),
                     "title": _csv_safe(row.get("title")),
-                    "video_url": _csv_safe(row.get("video_url")),
+                    "video_url": row.get("video_url"),
                     "published_at": _csv_safe(row.get("published_at")),
                     "transcript_status": _csv_safe(row.get("transcript_status")),
                     "transcript": _csv_safe(row.get("transcript")),

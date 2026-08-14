@@ -90,6 +90,32 @@ def _audit_row(video_id, has_description=False, status="ok"):
     }
 
 
+def test_write_review_csv_preserves_video_ids_starting_with_dash(tmp_path: Path) -> None:
+    """Regression: video_id is a machine identifier and must never be altered.
+
+    A spreadsheet formula-injection guard (``_csv_safe``) used to prepend an
+    apostrophe to any cell starting with ``-``; applied to video_id it corrupted
+    real YouTube IDs such as ``-acRraKkZfU``, breaking downstream lookups.
+    """
+    rows = [
+        {
+            "video_id": "-acRraKkZfU",
+            "title": "Some title",
+            "video_url": "https://www.youtube.com/watch?v=-acRraKkZfU",
+            "published_at": "2025-11-05",
+            "transcript_status": "success",
+            "transcript": "Hello",
+            "transcript_truncated": False,
+            "suggested_description": "Desc",
+        }
+    ]
+    path = tmp_path / "review.csv"
+    write_review_csv(rows, path)
+    content = path.read_text(encoding="utf-8")
+    assert "-acRraKkZfU" in content
+    assert "'-acRraKkZfU" not in content
+
+
 def test_build_combined_results_includes_only_cached_transcripts() -> None:
     rows = [
         _audit_row("done1"),
